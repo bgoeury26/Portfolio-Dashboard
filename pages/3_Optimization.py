@@ -5,7 +5,11 @@ import streamlit as st
 import yfinance as yf
 import cvxpy as cp
 
-from utils.session_state import get_portfolio, initialize_session_state
+from utils.session_state import (
+    get_portfolio,
+    initialize_session_state,
+    save_optimized_weights,
+)
 
 initialize_session_state()
 
@@ -52,7 +56,7 @@ tickers = portfolio_df["Symbol"].dropna().astype(str).unique().tolist()
 st.write("IBKR symbols detected:", tickers)
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def download_prices_individual(tickers, period):
     valid_data = {}
     failed_tickers = []
@@ -95,6 +99,9 @@ def download_prices_individual(tickers, period):
 
     return prices, failed_tickers
 
+if st.button("Refresh market data"):
+    download_prices_individual.clear()
+    st.rerun()
 
 prices, failed_tickers = download_prices_individual(tickers, lookback_period)
 
@@ -180,6 +187,18 @@ comparison_df = pd.DataFrame({
     "CurrentWeight": current_weights,
     "OptimizedWeight": optimized_weights,
 })
+
+optimized_store_df = comparison_df[["Symbol", "CurrentWeight", "OptimizedWeight"]].copy()
+
+save_optimized_weights(
+    optimized_store_df,
+    metadata={
+        "lookback_period": lookback_period,
+        "optimization_method": optimization_method,
+        "risk_free_rate": risk_free_rate,
+        "valid_tickers": valid_tickers,
+    },
+)
 
 comparison_df["CurrentWeightPct"] = comparison_df["CurrentWeight"] * 100
 comparison_df["OptimizedWeightPct"] = comparison_df["OptimizedWeight"] * 100
