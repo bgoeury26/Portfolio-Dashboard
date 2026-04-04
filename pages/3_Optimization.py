@@ -20,7 +20,6 @@ if df is None:
 st.caption(f"Using active portfolio: {st.session_state['portfolio_filename']}")
 
 portfolio_df = df.copy()
-
 portfolio_df["CurrentWeight"] = portfolio_df["PositionValue"] / portfolio_df["PositionValue"].sum()
 
 st.subheader("Optimization Settings")
@@ -31,13 +30,13 @@ with col1:
     lookback_period = st.selectbox(
         "Historical window",
         options=["6mo", "1y", "2y", "5y"],
-        index=1
+        index=1,
     )
 
 with col2:
     optimization_method = st.selectbox(
         "Objective",
-        options=["Minimum Variance", "Maximum Sharpe"]
+        options=["Minimum Variance", "Maximum Sharpe"],
     )
 
 with col3:
@@ -45,55 +44,112 @@ with col3:
         "Risk-free rate",
         min_value=0.0,
         max_value=0.15,
-        value=0.02,
-        step=0.005
+        value=0.04,
+        step=0.005,
     )
 
 tickers = portfolio_df["Symbol"].dropna().astype(str).unique().tolist()
+st.write("IBKR symbols detected:", tickers)
 
-st.write("Tickers used for optimization:", tickers)
 
 @st.cache_data
-def download_prices(tickers, period):
-    prices = yf.download(tickers, period=period, auto_adjust=True, progress=False)["Close"]
-    if isinstance(prices, pd.Series):
-        prices = prices.to_frame()
-    prices = prices.dropna(axis=1, how="all").dropna(how="any")
-    return prices
+def download_prices_individual(tickers, period):
+    valid_data = {}
+    failed_tickers = []
 
-try:
-    prices = download_prices(tickers, lookback_period)
-except Exception as e:
-    st.error(f"Failed to download historical data: {e}")
-    st.stop()
+    for ticker in tickers:
+        try:
+            data = yf.download(
+                ticker,
+                period=period,
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
 
-if prices.empty or prices.shape[1] < 2:
-    st.error("Not enough valid historical price data to run optimization.")
+            if data.empty:
+                failed_tickers.append(ticker)
+                continue
+
+            if "Close" not in data.columns:
+                failed_tickers.append(ticker)
+                continue
+
+            close_series = data["Close"].dropna()
+
+            if close_series.empty or len(close_series) < 30:
+                failed_tickers.append(ticker)
+                continue
+
+            valid_data[ticker] = close_series
+
+        except Exception:
+            failed_tickers.append(ticker)
+
+    if not valid_data:
+        return pd.DataFrame(), failed_tickers
+
+    prices = pd.concat(valid_data, axis=1)
+    prices.columns = list(valid_data.keys())
+    prices = prices.dropna(how="any")
+
+    return prices, failed_tickers
+
+
+prices, failed_tickers = download_prices_individual(tickers, lookback_period)
+
+valid_tickers = prices.columns.tolist() if not prices.empty else []
+
+st.subheader("Ticker Validation")
+
+col_a, col_b = st.columns(2)
+
+with col_a:
+    st.metric("Valid tickers", len(valid_tickers))
+
+with col_b:
+    st.metric("Excluded tickers", len(failed_tickers))
+
+if valid_tickers:
+    st.success("Valid Yahoo Finance tickers: " + ", ".join(valid_tickers))
+
+if failed_tickers:
+    st.warning(
+        "Excluded tickers with missing/invalid Yahoo Finance history: "
+        + ", ".join(failed_tickers)
+    )
+
+if prices.empty or len(valid_tickers) < 3:
+    st.error("Not enough valid historical price data to run optimization. We need at least 3 valid tickers.")
     st.stop()
 
 returns = prices.pct_change().dropna()
 
+if returns.empty:
+    st.error("No usable return series after cleaning price data.")
+    st.stop()
+
 mean_returns = returns.mean() * 252
 cov_matrix = returns.cov() * 252
 
-valid_tickers = prices.columns.tolist()
 opt_df = portfolio_df[portfolio_df["Symbol"].isin(valid_tickers)].copy()
 
-current_weights = (
+current_weights_series = (
     opt_df.groupby("Symbol", as_index=False)["CurrentWeight"]
     .sum()
     .set_index("Symbol")
     .reindex(valid_tickers)
     .fillna(0)["CurrentWeight"]
-    .values
 )
+
+current_weights = current_weights_series.values
+current_weights = current_weights / current_weights.sum()
 
 n = len(valid_tickers)
 w = cp.Variable(n)
 
 portfolio_return = mean_returns.values @ w
 portfolio_variance = cp.quad_form(w, cov_matrix.values)
-portfolio_volatility = cp.sqrt(portfolio_variance)
 
 constraints = [
     cp.sum(w) == 1,
@@ -103,9 +159,7 @@ constraints = [
 if optimization_method == "Minimum Variance":
     objective = cp.Minimize(portfolio_variance)
 else:
-    objective = cp.Maximize((portfolio_return - risk_free_rate))
-
-    constraints.append(portfolio_variance <= 1.0)
+    objective = cp.Maximize(portfolio_return - risk_free_rate * cp.sum(w))
 
 problem = cp.Problem(objective, constraints)
 
@@ -129,10 +183,7 @@ comparison_df = pd.DataFrame({
 
 comparison_df["CurrentWeightPct"] = comparison_df["CurrentWeight"] * 100
 comparison_df["OptimizedWeightPct"] = comparison_df["OptimizedWeight"] * 100
-comparison_df["WeightChangePct"] = (
-    comparison_df["OptimizedWeightPct"] - comparison_df["CurrentWeightPct"]
-)
-
+comparison_df["WeightChangePct"] = comparison_df["OptimizedWeightPct"] - comparison_df["CurrentWeightPct"]
 comparison_df = comparison_df.sort_values("OptimizedWeightPct", ascending=False)
 
 current_return = float(mean_returns.values @ current_weights)
@@ -174,7 +225,7 @@ chart_df = comparison_df.melt(
     id_vars="Symbol",
     value_vars=["CurrentWeightPct", "OptimizedWeightPct"],
     var_name="Portfolio",
-    value_name="WeightPct"
+    value_name="WeightPct",
 )
 
 fig_weights = px.bar(
@@ -183,7 +234,7 @@ fig_weights = px.bar(
     y="WeightPct",
     color="Portfolio",
     barmode="group",
-    title="Current vs Optimized Allocation"
+    title="Current vs Optimized Allocation",
 )
 st.plotly_chart(fig_weights, use_container_width=True)
 
