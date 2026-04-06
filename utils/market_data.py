@@ -140,3 +140,79 @@ def compute_treynor_ratio(portfolio_returns, benchmark_returns, risk_free_rate=0
 
     treynor = (annual_return - risk_free_rate) / beta
     return treynor, beta, annual_return
+
+
+def run_monte_carlo_portfolio_simulation(
+    asset_returns,
+    weights_series,
+    initial_value=100000,
+    n_days=252,
+    n_sims=3000,
+    seed=42,
+):
+    if asset_returns.empty or weights_series.empty:
+        return pd.DataFrame(), {}
+
+    common_cols = [col for col in asset_returns.columns if col in weights_series.index]
+    if not common_cols:
+        return pd.DataFrame(), {}
+
+    returns = asset_returns[common_cols].copy()
+    weights = weights_series.loc[common_cols].copy()
+
+    if weights.sum() == 0:
+        return pd.DataFrame(), {}
+
+    weights = weights / weights.sum()
+
+    mean_returns = returns.mean().values
+    cov_matrix = returns.cov().values
+
+    rng = np.random.default_rng(seed)
+
+    try:
+        simulated_daily_returns = rng.multivariate_normal(
+            mean=mean_returns,
+            cov=cov_matrix,
+            size=(n_sims, n_days),
+        )
+    except Exception:
+        return pd.DataFrame(), {}
+
+    portfolio_daily_returns = np.einsum("sda,a->sd", simulated_daily_returns, weights.values)
+
+    portfolio_paths = np.cumprod(1 + portfolio_daily_returns, axis=1) * initial_value
+    paths_df = pd.DataFrame(portfolio_paths.T)
+
+    ending_values = portfolio_paths[:, -1]
+    total_returns = ending_values / initial_value - 1
+
+    stats = {
+        "initial_value": initial_value,
+        "median_ending_value": float(np.median(ending_values)),
+        "mean_ending_value": float(np.mean(ending_values)),
+        "p5_ending_value": float(np.percentile(ending_values, 5)),
+        "p95_ending_value": float(np.percentile(ending_values, 95)),
+        "probability_of_loss": float(np.mean(ending_values < initial_value)),
+        "median_total_return": float(np.median(total_returns)),
+        "mean_total_return": float(np.mean(total_returns)),
+    }
+
+    return paths_df, stats
+
+
+def prepare_portfolio_weights_from_holdings(portfolio_df, valid_symbols):
+    if portfolio_df is None or portfolio_df.empty:
+        return pd.Series(dtype=float)
+
+    weights = (
+        portfolio_df[portfolio_df["Symbol"].isin(valid_symbols)]
+        .groupby("Symbol")["PositionValue"]
+        .sum()
+    )
+
+    if weights.empty or weights.sum() == 0:
+        return pd.Series(dtype=float)
+
+    weights = weights / weights.sum()
+    return weights
