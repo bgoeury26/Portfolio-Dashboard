@@ -216,3 +216,37 @@ def prepare_portfolio_weights_from_holdings(portfolio_df, valid_symbols):
 
     weights = weights / weights.sum()
     return weights
+
+
+def build_rebalance_table(current_weights, target_weights, total_portfolio_value):
+    current_weights = current_weights.copy()
+    target_weights = target_weights.copy()
+
+    all_symbols = sorted(set(current_weights.index).union(set(target_weights.index)))
+
+    current_weights = current_weights.reindex(all_symbols).fillna(0.0)
+    target_weights = target_weights.reindex(all_symbols).fillna(0.0)
+
+    rebalance_df = pd.DataFrame({
+        "Symbol": all_symbols,
+        "CurrentWeight": current_weights.values,
+        "TargetWeight": target_weights.values,
+    })
+
+    rebalance_df["ActiveWeight"] = rebalance_df["TargetWeight"] - rebalance_df["CurrentWeight"]
+    rebalance_df["CurrentValue"] = rebalance_df["CurrentWeight"] * total_portfolio_value
+    rebalance_df["TargetValue"] = rebalance_df["TargetWeight"] * total_portfolio_value
+    rebalance_df["TradeValue"] = rebalance_df["TargetValue"] - rebalance_df["CurrentValue"]
+    rebalance_df["TradeAction"] = rebalance_df["TradeValue"].apply(
+        lambda x: "Buy" if x > 0 else ("Sell" if x < 0 else "Hold")
+    )
+
+    return rebalance_df.sort_values("TradeValue", ascending=False)
+
+
+def compute_turnover_from_rebalance(rebalance_df):
+    if rebalance_df.empty:
+        return 0.0
+
+    turnover = rebalance_df["TradeValue"].abs().sum() / 2
+    return turnover
