@@ -1,218 +1,154 @@
+import numpy as np
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from datetime import date, timedelta
 
-from utils.market_data import (
-    compute_returns_from_prices,
-    get_multi_asset_close_prices,
-    prepare_portfolio_weights_from_holdings,
-    run_monte_carlo_portfolio_simulation,
-)
+from openbb import obb
+
 from utils.session_state import (
-    get_optimized_weights,
     get_portfolio,
     initialize_session_state,
 )
 
+st.set_page_config(page_title="Monte Carlo", page_icon="🎲", layout="wide")
 initialize_session_state()
 
-st.header("Monte Carlo Simulation")
+st.title("Monte Carlo Simulation")
 
-portfolio_df = get_portfolio()
-optimized_weights_df = get_optimized_weights()
-
-if portfolio_df is None:
-    st.warning("Please upload a portfolio first in Portfolio Overview.")
+# ── Load portfolio (identical pattern to Optimization page) ──────────────────
+df = get_portfolio()
+if df is None or df.empty:
+    st.warning("No portfolio loaded. Please upload your IBKR CSV on the **Portfolio Overview** page first.")
     st.stop()
 
-simulation_horizon = st.slider("Simulation horizon (trading days)", 21, 504, 252, 21)
-n_sims = st.slider("Number of simulations", 500, 10000, 3000, 500)
-initial_value = st.number_input("Initial portfolio value", min_value=1000, value=100000, step=5000)
+st.caption(f"Using active portfolio: {st.session_state['portfolio_filename']}")
 
-portfolio_symbols = portfolio_df["Symbol"].dropna().astype(str).unique().tolist()
-
-prices_df, valid_symbols, failed_symbols = get_multi_asset_close_prices(
-    portfolio_symbols,
-    start_date="2024-01-01",
-)
-
-if failed_symbols:
-    st.warning("Excluded symbols from simulation: " + ", ".join(failed_symbols))
-
-if prices_df.empty or len(valid_symbols) < 2:
-    st.error("Not enough valid market data to run Monte Carlo simulation.")
-    st.stop()
-
-asset_returns = compute_returns_from_prices(prices_df)
-current_weights = prepare_portfolio_weights_from_holdings(portfolio_df, valid_symbols)
-
-current_paths, current_stats = run_monte_carlo_portfolio_simulation(
-    asset_returns=asset_returns,
-    weights_series=current_weights,
-    initial_value=initial_value,
-    n_days=simulation_horizon,
-    n_sims=n_sims,
-    seed=42,
-)
-
-if current_paths.empty:
-    st.error("Current portfolio simulation failed.")
-    st.stop()
-
-summary_rows = [
-    {
-        "Portfolio": "Current",
-        "Median Ending Value": current_stats["median_ending_value"],
-        "Mean Ending Value": current_stats["mean_ending_value"],
-        "5th Percentile": current_stats["p5_ending_value"],
-        "95th Percentile": current_stats["p95_ending_value"],
-        "Probability of Loss": current_stats["probability_of_loss"],
-        "Median Return": current_stats["median_total_return"],
-        "Mean Return": current_stats["mean_total_return"],
-    }
-]
-
-optimized_paths = None
-optimized_stats = None
-
-if optimized_weights_df is not None:
-    optimized_weights = (
-        optimized_weights_df[optimized_weights_df["Symbol"].isin(valid_symbols)]
-        .set_index("Symbol")["OptimizedWeight"]
-    )
-
-    if not optimized_weights.empty and optimized_weights.sum() > 0:
-        optimized_weights = optimized_weights / optimized_weights.sum()
-
-        optimized_paths, optimized_stats = run_monte_carlo_portfolio_simulation(
-            asset_returns=asset_returns,
-            weights_series=optimized_weights,
-            initial_value=initial_value,
-            n_days=simulation_horizon,
-            n_sims=n_sims,
-            seed=42,
-        )
-
-        if not optimized_paths.empty:
-            summary_rows.append(
-                {
-                    "Portfolio": "Optimized",
-                    "Median Ending Value": optimized_stats["median_ending_value"],
-                    "Mean Ending Value": optimized_stats["mean_ending_value"],
-                    "5th Percentile": optimized_stats["p5_ending_value"],
-                    "95th Percentile": optimized_stats["p95_ending_value"],
-                    "Probability of Loss": optimized_stats["probability_of_loss"],
-                    "Median Return": optimized_stats["median_total_return"],
-                    "Mean Return": optimized_stats["mean_total_return"],
-                }
-            )
-
-summary_df = pd.DataFrame(summary_rows)
-
-st.subheader("Simulation Summary")
-
-st.dataframe(
-    summary_df.style.format({
-        "Median Ending Value": "{:,.2f}",
-        "Mean Ending Value": "{:,.2f}",
-        "5th Percentile": "{:,.2f}",
-        "95th Percentile": "{:,.2f}",
-        "Probability of Loss": "{:.2%}",
-        "Median Return": "{:.2%}",
-        "Mean Return": "{:.2%}",
-    }),
-    use_container_width=True,
-)
-
+# ── Simulation Settings ──────────────────────────────────────────────────────
+st.subheader("Simulation Settings")
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.metric("Current Median Ending Value", f"{current_stats['median_ending_value']:,.0f}")
-
+    horizon = st.slider("Simulation horizon (trading days)", 21, 504, 252)
 with col2:
-    st.metric("Current 5th Percentile", f"{current_stats['p5_ending_value']:,.0f}")
-
+    n_sims = st.slider("Number of simulations", 500, 10000, 3000, step=500)
 with col3:
-    st.metric("Current Probability of Loss", f"{current_stats['probability_of_loss']:.2%}")
+    init_val = st.number_input("Initial portfolio value ($)", value=100000, step=1000)
 
-if optimized_stats is not None:
-    col4, col5, col6 = st.columns(3)
+window = st.selectbox("Historical window", ["1Y", "2Y", "3Y", "5Y"], index=1)
+st.checkbox("Refresh market data", value=True)
 
-    with col4:
-        st.metric("Optimized Median Ending Value", f"{optimized_stats['median_ending_value']:,.0f}")
+WINDOW_MAP = {"1Y": "1year", "2Y": "2year", "3Y": "3year", "5Y": "5year"}
 
-    with col5:
-        st.metric("Optimized 5th Percentile", f"{optimized_stats['p5_ending_value']:,.0f}")
+# ── Extract tickers (identical pattern to Optimization page) ─────────────────
+tickers = df["Symbol"].dropna().unique().tolist()
 
-    with col6:
-        st.metric("Optimized Probability of Loss", f"{optimized_stats['probability_of_loss']:.2%}")
-else:
-    st.info("Run Optimization first to compare Monte Carlo outcomes versus the optimized portfolio.")
+# ── Fetch prices via OpenBB per-ticker (identical to Optimization page) ───────
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_prices_openbb(tickers_tuple: tuple, window: str) -> tuple:
+    period = WINDOW_MAP.get(window, "1year")
+    frames = []
+    excluded = []
+    for ticker in tickers_tuple:
+        try:
+            raw = obb.equity.price.historical(
+                symbol=ticker,
+                period=period,
+                provider="yfinance",
+            )
+            tmp = raw.to_df()
+            if tmp.empty:
+                excluded.append(ticker)
+                continue
+            tmp = tmp[["close"]].rename(columns={"close": ticker})
+            frames.append(tmp)
+        except Exception:
+            excluded.append(ticker)
+    if not frames:
+        return pd.DataFrame(), excluded
+    prices = pd.concat(frames, axis=1).dropna(how="all")
+    return prices, excluded
 
-st.subheader("Sample Simulated Paths")
+with st.spinner("Fetching price data via OpenBB…"):
+    prices, excluded = fetch_prices_openbb(tuple(tickers), window)
 
-current_sample = current_paths.iloc[:, :100].copy()
-current_sample["Day"] = range(1, len(current_sample) + 1)
-current_long = current_sample.melt(id_vars="Day", var_name="Simulation", value_name="Portfolio Value")
-current_long["Portfolio"] = "Current"
+if excluded:
+    st.info(f"**Excluded symbols** (no data from OpenBB/yfinance): {', '.join(excluded)}")
 
-plot_df = current_long
+valid_tickers = [t for t in tickers if t in prices.columns]
 
-if optimized_paths is not None and not optimized_paths.empty:
-    optimized_sample = optimized_paths.iloc[:, :100].copy()
-    optimized_sample["Day"] = range(1, len(optimized_sample) + 1)
-    optimized_long = optimized_sample.melt(id_vars="Day", var_name="Simulation", value_name="Portfolio Value")
-    optimized_long["Portfolio"] = "Optimized"
-    plot_df = pd.concat([current_long, optimized_long], ignore_index=True)
+if len(valid_tickers) < 2:
+    st.error(f"Only {len(valid_tickers)} ticker(s) could be resolved. Need at least 2 to run simulation.")
+    st.info(
+        "**Tip:** European ETFs (ISF, SXR8, PHAG, etc.) are not listed on Yahoo Finance. "
+        "Try appending an exchange suffix in your holdings CSV, e.g. `SXR8.DE`, `ISF.L`, `PHAG.L`."
+    )
+    st.stop()
 
-fig_paths = px.line(
-    plot_df,
-    x="Day",
-    y="Portfolio Value",
-    color="Portfolio",
-    line_group="Simulation",
-    title="Monte Carlo Simulated Portfolio Paths",
+prices = prices[valid_tickers].ffill().dropna()
+
+# ── Build weights from portfolio ─────────────────────────────────────────────
+port = df[df["Symbol"].isin(valid_tickers)].copy()
+port["_w"] = port["PositionValue"].abs() / port["PositionValue"].abs().sum()
+weights = port.set_index("Symbol")["_w"].reindex(valid_tickers).fillna(0).values
+weights = weights / weights.sum()
+
+# ── Monte Carlo engine ────────────────────────────────────────────────────────
+returns = prices.pct_change().dropna()
+mu  = returns.mean().values
+cov = returns.cov().values
+
+np.random.seed(42)
+sims = np.zeros((horizon, n_sims))
+for i in range(n_sims):
+    daily_rets = np.random.multivariate_normal(mu, cov, horizon)
+    port_rets  = daily_rets @ weights
+    sims[:, i] = init_val * np.cumprod(1 + port_rets)
+
+final_vals = sims[-1]
+p5  = np.percentile(final_vals, 5)
+p50 = np.percentile(final_vals, 50)
+p95 = np.percentile(final_vals, 95)
+
+# ── KPI row ───────────────────────────────────────────────────────────────────
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Median outcome",         f"${p50:,.0f}", f"{(p50/init_val-1)*100:+.1f}%")
+k2.metric("5th pct (downside VaR)", f"${p5:,.0f}",  f"{(p5/init_val-1)*100:+.1f}%")
+k3.metric("95th pct (upside)",      f"${p95:,.0f}", f"{(p95/init_val-1)*100:+.1f}%")
+k4.metric("Prob. of loss",          f"{(final_vals < init_val).mean()*100:.1f}%")
+
+# ── Simulation fan chart ──────────────────────────────────────────────────────
+sample_idx = np.random.choice(n_sims, min(300, n_sims), replace=False)
+fig = go.Figure()
+for i in sample_idx:
+    fig.add_trace(go.Scatter(
+        y=sims[:, i], mode="lines",
+        line=dict(width=0.5, color="rgba(180,180,255,0.12)"),
+        showlegend=False, hoverinfo="skip",
+    ))
+for val, name, color in [(p5, "5th pct", "tomato"), (p50, "Median", "white"), (p95, "95th pct", "limegreen")]:
+    fig.add_hline(y=val, line_dash="dash", line_color=color,
+                  annotation_text=f"{name}: ${val:,.0f}",
+                  annotation_font_color=color)
+fig.update_layout(
+    title=f"Monte Carlo — {n_sims:,} simulations × {horizon} trading days ({len(valid_tickers)} tickers)",
+    xaxis_title="Trading Days", yaxis_title="Portfolio Value ($)",
+    template="plotly_dark", height=500,
 )
+st.plotly_chart(fig, use_container_width=True)
 
-fig_paths.update_traces(opacity=0.10)
-st.plotly_chart(fig_paths, use_container_width=True)
-
-st.subheader("Ending Value Distribution")
-
-distribution_df = pd.DataFrame({
-    "Ending Value": current_paths.iloc[-1, :].values,
-    "Portfolio": "Current",
-})
-
-if optimized_paths is not None and not optimized_paths.empty:
-    optimized_dist = pd.DataFrame({
-        "Ending Value": optimized_paths.iloc[-1, :].values,
-        "Portfolio": "Optimized",
-    })
-    distribution_df = pd.concat([distribution_df, optimized_dist], ignore_index=True)
-
-fig_hist = px.histogram(
-    distribution_df,
-    x="Ending Value",
-    color="Portfolio",
-    nbins=50,
-    barmode="overlay",
-    title="Distribution of Simulated Ending Portfolio Values",
-    opacity=0.60,
+# ── Distribution of final values ─────────────────────────────────────────────
+fig2 = go.Figure()
+fig2.add_trace(go.Histogram(x=final_vals, nbinsx=80,
+                            marker_color="steelblue", opacity=0.85))
+fig2.add_vline(x=init_val, line_dash="dash", line_color="gold",
+               annotation_text="Initial Value", annotation_font_color="gold")
+fig2.add_vline(x=p5,  line_dash="dash", line_color="tomato",
+               annotation_text="5th pct", annotation_font_color="tomato")
+fig2.add_vline(x=p50, line_dash="dash", line_color="white",
+               annotation_text="Median",  annotation_font_color="white")
+fig2.update_layout(
+    title="Distribution of Final Portfolio Values",
+    xaxis_title="Portfolio Value ($)", yaxis_title="Frequency",
+    template="plotly_dark", height=400,
 )
-st.plotly_chart(fig_hist, use_container_width=True)
-
-st.subheader("Interpretation")
-
-if current_stats["probability_of_loss"] >= 0.40:
-    st.warning("The current portfolio shows a relatively high probability of finishing below the starting value in this simulation setup.")
-else:
-    st.success("The current portfolio shows a relatively moderate probability of loss in this simulation setup.")
-
-if optimized_stats is not None:
-    if optimized_stats["probability_of_loss"] < current_stats["probability_of_loss"]:
-        st.success("The optimized portfolio appears more resilient than the current portfolio in the Monte Carlo simulation.")
-    elif optimized_stats["probability_of_loss"] > current_stats["probability_of_loss"]:
-        st.warning("The optimized portfolio appears less resilient than the current portfolio in the Monte Carlo simulation.")
-    else:
-        st.info("The current and optimized portfolios show similar loss probabilities in the Monte Carlo simulation.")
+st.plotly_chart(fig2, use_container_width=True)
