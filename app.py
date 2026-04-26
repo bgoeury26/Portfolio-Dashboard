@@ -1,3 +1,16 @@
+import os, tempfile, pathlib
+
+try:
+    import openbb_core.app.static.package_builder as _pb
+    _tmp_lock = pathlib.Path(tempfile.gettempdir()) / "openbb.build.lock"
+    _orig_init = _pb.PackageBuilder.__init__
+    def _patched_init(self, directory=None, lint=True, verbose=False):
+        _orig_init(self, directory, lint, verbose)
+        self.lock_path = _tmp_lock
+    _pb.PackageBuilder.__init__ = _patched_init
+except Exception:
+    pass
+
 import streamlit as st
 from utils.session_state import initialize_session_state, get_portfolio
 
