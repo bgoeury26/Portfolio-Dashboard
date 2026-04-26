@@ -1,12 +1,24 @@
-import pathlib, tempfile
+"""
+Redirects OpenBB's build lock file from read-only venv to /tmp.
+Must be imported before any 'from openbb import obb'.
+Patches pathlib.Path.touch + builtins.open at stdlib level.
+"""
+import builtins, pathlib, tempfile
 
-try:
-    import openbb_core.app.static.package_builder as _pb
-    _tmp = pathlib.Path(tempfile.gettempdir()) / "openbb.build.lock"
-    _orig = _pb.PackageBuilder.__init__
-    def _p(self, directory=None, lint=True, verbose=False):
-        _orig(self, directory, lint, verbose)
-        self.lock_path = _tmp
-    _pb.PackageBuilder.__init__ = _p
-except Exception:
-    pass
+_TMP = str(pathlib.Path(tempfile.gettempdir()) / "openbb.build.lock")
+
+# --- Patch 1: pathlib.Path.touch ---
+_orig_touch = pathlib.Path.touch
+def _safe_touch(self, mode=0o666, exist_ok=True):
+    if ".build.lock" in str(self):
+        self = pathlib.Path(_TMP)
+    return _orig_touch(self, mode=mode, exist_ok=exist_ok)
+pathlib.Path.touch = _safe_touch
+
+# --- Patch 2: builtins.open ---
+_orig_open = builtins.open
+def _safe_open(file, mode="r", *args, **kwargs):
+    if ".build.lock" in str(file):
+        file = _TMP
+    return _orig_open(file, mode, *args, **kwargs)
+builtins.open = _safe_open
