@@ -7,17 +7,13 @@ try:
 except ImportError:
     _FRED_OK = False
 
-
 def get_fred_client():
     if not _FRED_OK:
         return None
     api_key = os.environ.get("FRED_API_KEY", "")
-    if not api_key:
-        return None
-    return Fred(api_key=api_key)
+    return Fred(api_key=api_key) if api_key else None
 
-
-def get_macro_bundle() -> dict:
+def get_macro_bundle(start_date: str = "2018-01-01") -> dict:
     client = get_fred_client()
     if client is None:
         return {}
@@ -34,7 +30,7 @@ def get_macro_bundle() -> dict:
     bundle = {}
     for name, sid in series.items():
         try:
-            bundle[name] = client.get_series(sid)
+            bundle[name] = client.get_series(sid, observation_start=start_date)
         except Exception:
             bundle[name] = pd.Series(dtype=float)
     return bundle

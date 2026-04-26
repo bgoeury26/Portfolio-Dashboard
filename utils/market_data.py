@@ -1,3 +1,4 @@
+import utils.openbb_patch  # noqa: F401
 from openbb import obb
 import pandas as pd
 import numpy as np
